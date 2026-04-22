@@ -20,6 +20,7 @@ type CatalogEntry struct {
 // NodePools may schedule onto in Phase 1.
 var Catalog = []CatalogEntry{
 	{Name: "Standard_ND96isr_H200_v5", VCPU: 96, MemoryGB: 1900, GPU: 8},
+	{Name: "Standard_ND96isr_H100_v5", VCPU: 96, MemoryGB: 1900, GPU: 8},
 	{Name: "Standard_ND96amsr_A100_v4", VCPU: 96, MemoryGB: 1900, GPU: 8},
 	{Name: "Standard_NC40ads_H100_v5", VCPU: 40, MemoryGB: 320, GPU: 1},
 	{Name: "Standard_NC24ads_A100_v4", VCPU: 24, MemoryGB: 220, GPU: 1},
