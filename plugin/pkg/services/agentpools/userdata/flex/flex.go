@@ -27,7 +27,7 @@ var bootstrapTmpl string
 var bootstrapTemplate = template.Must(template.New("bootstrap.sh").Parse(bootstrapTmpl))
 
 const (
-	flexNodeVersion = "v0.0.17"
+	flexNodeVersion = "v0.0.18"
 	defaultArch     = "amd64"
 	DefaultKubeVer  = "1.34.2"
 )
