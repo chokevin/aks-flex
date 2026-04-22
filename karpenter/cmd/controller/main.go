@@ -26,6 +26,7 @@ import (
 	kaitov1alpha1 "github.com/Azure/aks-flex/karpenter/pkg/apis/kaito/v1alpha1"
 	"github.com/Azure/aks-flex/karpenter/pkg/apis/v1alpha1"
 	flexcloudproviders "github.com/Azure/aks-flex/karpenter/pkg/cloudproviders"
+	azureflex "github.com/Azure/aks-flex/karpenter/pkg/cloudproviders/azure"
 	"github.com/Azure/aks-flex/karpenter/pkg/cloudproviders/kaito"
 	"github.com/Azure/aks-flex/karpenter/pkg/cloudproviders/nebius"
 	flexcontrollers "github.com/Azure/aks-flex/karpenter/pkg/controllers"
@@ -47,6 +48,7 @@ func main() {
 		operator.WaitForCRDs(
 			ctx, 2*time.Minute, ctrl.GetConfigOrDie(), logger,
 			&v1alpha1.NebiusNodeClass{},
+			&v1alpha1.AzureFlexNodeClass{},
 			&kaitov1alpha1.KaitoNodeClass{},
 		),
 		"failed waiting for CRDs",
@@ -117,6 +119,17 @@ func main() {
 			wgAlloc,
 		)
 		lo.Must0(err, "registering kaito cloud provider")
+	}
+
+	// azure-flex (cross-region single-VM Azure cloud provider)
+	{
+		err := azureflex.Register(
+			ctx,
+			hubCloudProvider,
+			op.GetClient(),
+			clusterCA,
+		)
+		lo.Must0(err, "registering azure-flex cloud provider")
 	}
 
 	overlayUndecoratedCloudProvider := metrics.Decorate(hubCloudProvider)

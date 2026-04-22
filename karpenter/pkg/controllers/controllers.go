@@ -7,6 +7,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/karpenter/pkg/events"
 
+	"github.com/Azure/aks-flex/karpenter/pkg/controllers/azure"
 	"github.com/Azure/aks-flex/karpenter/pkg/controllers/nebius"
 	"github.com/Azure/aks-flex/karpenter/pkg/controllers/nodes"
 )
@@ -20,6 +21,9 @@ func NewControllers(
 		// TODO: implement node class hash logic for drift detection/reconciliation
 		nebius.NewNodeClassStatusController(kubeClient),
 		nebius.NewNodeClassTerminationController(kubeClient, recorder),
+
+		azure.NewNodeClassStatusController(kubeClient),
+		azure.NewNodeClassTerminationController(kubeClient, recorder),
 
 		nodes.NewSetProviderIDController(kubeClient),
 	}
