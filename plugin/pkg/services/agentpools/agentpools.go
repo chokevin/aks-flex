@@ -5,6 +5,7 @@ import (
 	"github.com/Azure/aks-flex/plugin/pkg/server"
 	"github.com/Azure/aks-flex/plugin/pkg/services/agentpools/api"
 	"github.com/Azure/aks-flex/plugin/pkg/services/agentpools/aws/ubuntu2404instance"
+	"github.com/Azure/aks-flex/plugin/pkg/services/agentpools/azure/flexvm"
 	"github.com/Azure/aks-flex/plugin/pkg/services/agentpools/azure/ubuntu2404vmss"
 	nebiusinstance "github.com/Azure/aks-flex/plugin/pkg/services/agentpools/nebius/instance"
 )
@@ -26,6 +27,10 @@ func NewAgentPoolsServer(db db.DB) api.AgentPoolsServer {
 	server.MustRegister(srv.Servers, func() (api.AgentPoolsServer, error) {
 		return ubuntu2404vmss.NewAgentPoolsServer(srv.DB)
 	}, &ubuntu2404vmss.AgentPool{})
+
+	server.MustRegister(srv.Servers, func() (api.AgentPoolsServer, error) {
+		return flexvm.NewAgentPoolsServer(srv.DB)
+	}, &flexvm.AgentPool{})
 
 	server.MustRegister(srv.Servers, func() (api.AgentPoolsServer, error) {
 		return nebiusinstance.NewAgentPoolsServer(srv.DB)

@@ -11,6 +11,7 @@ import (
 	"github.com/Azure/aks-flex/plugin/pkg/server"
 	"github.com/Azure/aks-flex/plugin/pkg/services/agentpools/api"
 	"github.com/Azure/aks-flex/plugin/pkg/services/agentpools/aws/ubuntu2404instance"
+	"github.com/Azure/aks-flex/plugin/pkg/services/agentpools/azure/flexvm"
 	"github.com/Azure/aks-flex/plugin/pkg/services/agentpools/azure/ubuntu2404vmss"
 )
 
@@ -31,6 +32,10 @@ func NewInstancesServer(db db.DB) api.InstancesServer {
 	server.MustRegister(srv.Servers, func() (api.InstancesServer, error) {
 		return ubuntu2404vmss.NewInstancesServer(srv.DB)
 	}, &ubuntu2404vmss.AgentPool{})
+
+	server.MustRegister(srv.Servers, func() (api.InstancesServer, error) {
+		return flexvm.NewInstancesServer(srv.DB)
+	}, &flexvm.AgentPool{})
 
 	return srv
 }

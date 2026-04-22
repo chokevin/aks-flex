@@ -1,0 +1,23 @@
+edition = "2024";
+
+package agentpools.azure.flexvm;
+
+option go_package = "github.com/Azure/aks-flex/plugin/pkg/services/agentpools/azure/flexvm";
+
+import "plugin/api/api.proto";
+
+// flexvm models one VM per AgentPool, so an Instance is just the AgentPool
+// itself with id "<agentpool>/0". This matches the AWS ubuntu2404instance shape.
+message Instance {
+  api.Metadata metadata = 1;
+
+  InstanceSpec spec = 2;
+
+  InstanceStatus status = 3;
+}
+
+message InstanceSpec {
+}
+
+message InstanceStatus {
+}
