@@ -71,6 +71,40 @@ subjects:
 - kind: Group
   name: system:bootstrappers:kubeadm:default-node-token
 ---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  namespace: kube-public
+  name: kubeadm:bootstrap-signer-clusterinfo
+rules:
+- verbs: ["get"]
+  apiGroups: [""]
+  resources: ["configmaps"]
+  resourceNames: ["cluster-info"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  namespace: kube-public
+  name: kubeadm:bootstrap-signer-clusterinfo
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: kubeadm:bootstrap-signer-clusterinfo
+# kubeadm's stock template binds this to system:anonymous, which only works
+# when the API server allows anonymous auth. AKS sets --anonymous-auth=false
+# cluster-wide, so we bind to the bootstrap-token groups instead. The
+# misleading kubeadm error "[discovery] ... Unauthorized" is actually a 403
+# from this RoleBinding when the discovery client (authenticated via the
+# bootstrap token) tries to read kube-public/cluster-info.
+subjects:
+- kind: Group
+  name: system:bootstrappers
+  apiGroup: rbac.authorization.k8s.io
+- kind: Group
+  name: system:bootstrappers:kubeadm:default-node-token
+  apiGroup: rbac.authorization.k8s.io
+---
 apiVersion: v1
 kind: ConfigMap
 metadata:
