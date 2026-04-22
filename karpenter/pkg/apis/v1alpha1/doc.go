@@ -17,6 +17,8 @@ var (
 		scheme.AddKnownTypes(SchemeGroupVersion,
 			&NebiusNodeClass{},
 			&NebiusNodeClassList{},
+			&AzureFlexNodeClass{},
+			&AzureFlexNodeClassList{},
 		)
 		metav1.AddToGroupVersion(scheme, SchemeGroupVersion)
 		return nil

@@ -4,20 +4,20 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.20.1
-  name: nebiusnodeclasses.flex.aks.azure.com
+  name: azureflexnodeclasses.flex.aks.azure.com
 spec:
   group: flex.aks.azure.com
   names:
     categories:
     - karpenter
     - nap
-    kind: NebiusNodeClass
-    listKind: NebiusNodeClassList
-    plural: nebiusnodeclasses
+    kind: AzureFlexNodeClass
+    listKind: AzureFlexNodeClassList
+    plural: azureflexnodeclasses
     shortNames:
-    - nbnc
-    - nbncs
-    singular: nebiusnodeclass
+    - afnc
+    - afncs
+    singular: azureflexnodeclass
   scope: Cluster
   versions:
   - additionalPrinterColumns:
@@ -30,6 +30,12 @@ spec:
     name: v1alpha1
     schema:
       openAPIV3Schema:
+        description: |-
+          AzureFlexNodeClass is the Schema for the AzureFlexNodeClass API.
+
+          It enables a NodePool in an AKS cluster to auto-provision external Azure VMs in a
+          (potentially different) Azure region than the AKS cluster's own region. Each node
+          is a single VM (not VMSS) so that cross-region placement is straightforward.
         properties:
           apiVersion:
             description: |-
@@ -49,50 +55,99 @@ spec:
           metadata:
             type: object
           spec:
+            description: |-
+              AzureFlexNodeClassSpec is the spec for AzureFlexNodeClass.
+
+              Phase 1 scope (issue #63): single region per NodeClass, no spot, no zones,
+              no identity/UAMI per-NodeClass (the controller MI is assumed to have
+              Contributor on the target subscription/RG/subnet), no quota preflight,
+              no PPG/capacity reservation, no spot, no WireGuard.
             properties:
               allocateNodePublicIP:
                 default: false
+                description: AllocateNodePublicIP controls whether each node receives
+                  a public IP.
                 type: boolean
+              imageID:
+                description: ImageID is a SIG / community gallery image resource ID.
+                  Mutually exclusive with ImageReference.
+                type: string
+              imageReference:
+                description: |-
+                  ImageReference selects an Azure Marketplace image. Mutually exclusive with ImageID.
+                  If neither is set, defaults to microsoft-dsvm/ubuntu-hpc/2204/latest.
+                properties:
+                  offer:
+                    type: string
+                  publisher:
+                    type: string
+                  sku:
+                    type: string
+                  version:
+                    default: latest
+                    type: string
+                required:
+                - offer
+                - publisher
+                - sku
+                type: object
+              location:
+                description: Location is the Azure region (e.g. "eastus2"). May differ
+                  from the AKS cluster region.
+                type: string
               maxPodsPerNode:
                 default: 110
-                description: |-
-                  MaxPodsPerNode is the maximum number of pods that can be scheduled on a single node.
-                  This value is advertised in the node's capacity and affects Karpenter's scheduling decisions.
+                description: MaxPodsPerNode is advertised in the node's capacity and
+                  affects Karpenter scheduling.
                 format: int32
                 type: integer
-              osDiskImageFamily:
-                default: ubuntu24.04-driverless
-                type: string
               osDiskSizeGB:
                 default: 128
                 description: OSDiskSizeGB is the size of the OS disk in GB.
                 format: int32
                 type: integer
-              projectID:
-                description: ProjectID is the nebius project id to launch nodes in.
+              resourceGroup:
+                description: |-
+                  ResourceGroup is the resource group where VMs, NICs, and OS disks land.
+                  Must already exist.
                 type: string
-              region:
-                description: Region sets the nebius region to launch nodes in. Must
-                  be a region where the specified subnet exists.
+              securityType:
+                default: Standard
+                description: |-
+                  SecurityType selects the VM security profile. Currently only "Standard" is supported.
+                  TrustedLaunch is deferred — it has been observed to break the DSVM image.
+                enum:
+                - Standard
                 type: string
+              sshPublicKeys:
+                description: SSHPublicKeys is the list of SSH public keys to install
+                  on each node.
+                items:
+                  type: string
+                type: array
               subnetID:
                 description: |-
-                  SubnetID is the nebius subnet id to launch nodes in.
-                  Node will be auto-assigned an IP from this subnet.
+                  SubnetID is the full ARM resource ID of the subnet (must already exist
+                  and be reachable from the AKS cluster).
                 type: string
-              wireguardPeerCIDR:
-                description: |-
-                  WireguardPeerCIDR is the CIDR to use for Wireguard peer IPs.
-                  When this is set to a non-empty value, nodes will be allocated with a IP address
-                  from this CIDR and configured to use Wireguard for node to node networking.
+              subscriptionID:
+                description: SubscriptionID is the Azure subscription where VMs will
+                  be created.
                 type: string
+              tags:
+                additionalProperties:
+                  type: string
+                description: Tags are applied to every Azure resource (VM, NIC, OS
+                  disk) created from this NodeClass.
+                type: object
             required:
-            - projectID
-            - region
+            - location
+            - resourceGroup
             - subnetID
+            - subscriptionID
             type: object
           status:
-            description: status contains the resolved state of the NebiusNodeClass.
+            description: status contains the resolved state of the AzureFlexNodeClass.
             properties:
               conditions:
                 description: conditions contains signals for health and readiness
