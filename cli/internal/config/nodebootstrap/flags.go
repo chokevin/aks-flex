@@ -28,15 +28,15 @@ func parseNodeLabels(in []string) (map[string]string, error) {
 }
 
 // parseTaints parses a slice of "key=value:Effect" or "key:Effect" strings into
-// corev1.Taints. Effect must be one of NoSchedule, PreferNoSchedule, NoExecute.
+// []corev1.Taint. Effect must be one of NoSchedule, PreferNoSchedule, NoExecute.
 func parseTaints(in []string) ([]corev1.Taint, error) {
 	if len(in) == 0 {
 		return nil, nil
 	}
 	out := make([]corev1.Taint, 0, len(in))
 	for _, s := range in {
-		// Effect is everything after the LAST ':' so values containing ':' are
-		// not supported (matches kubectl convention).
+		// Effect is everything after the LAST ':'. This allows ':' in the value
+		// portion when the input is in key=value:Effect form.
 		idx := strings.LastIndex(s, ":")
 		if idx < 0 {
 			return nil, fmt.Errorf("invalid --taint %q: expected key[=value]:Effect", s)
