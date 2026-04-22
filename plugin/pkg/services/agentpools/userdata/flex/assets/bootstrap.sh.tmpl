@@ -3,5 +3,12 @@ curl -L -o /tmp/flex/aks-flex-node-linux-{{ .Arch }}.tar.gz https://github.com/A
 tar -xzf /tmp/flex/aks-flex-node-linux-{{ .Arch }}.tar.gz -C /tmp/flex
 mv /tmp/flex/aks-flex-node-linux-{{ .Arch }} /tmp/flex/aks-flex-node
 chmod +x /tmp/flex/aks-flex-node
+# Workaround for AKSFlexNode v0.0.x gap: ships containerd v2 binary but writes
+# a v1-schema config. Regenerate the default config (which produces the v3
+# schema containerd v2 expects) and restart before running apply, otherwise
+# kubelet/kubeadm join hangs because CRI is non-functional.
+mkdir -p /etc/containerd
+containerd config default | sed -e '/SystemdCgroup/ s/false/true/' >/etc/containerd/config.toml
+systemctl restart containerd
 /tmp/flex/aks-flex-node apply -f /tmp/flex-config.json
 rm -rf /tmp/flex
