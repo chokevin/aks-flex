@@ -3,12 +3,49 @@ curl -L -o /tmp/flex/aks-flex-node-linux-{{ .Arch }}.tar.gz https://github.com/A
 tar -xzf /tmp/flex/aks-flex-node-linux-{{ .Arch }}.tar.gz -C /tmp/flex
 mv /tmp/flex/aks-flex-node-linux-{{ .Arch }} /tmp/flex/aks-flex-node
 chmod +x /tmp/flex/aks-flex-node
-# Workaround for AKSFlexNode v0.0.x gap: ships containerd v2 binary but writes
-# a v1-schema config. Regenerate the default config (which produces the v3
-# schema containerd v2 expects) and restart before running apply, otherwise
-# kubelet/kubeadm join hangs because CRI is non-functional.
-mkdir -p /etc/containerd
-containerd config default | sed -e '/SystemdCgroup/ s/false/true/' >/etc/containerd/config.toml
-systemctl restart containerd
 /tmp/flex/aks-flex-node apply -f /tmp/flex-config.json
+# Workaround for AKSFlexNode v0.0.x gap: aks-flex-node apply writes a
+# v1-schema containerd config (e.g. [plugins."io.containerd.grpc.v1.cri".cni])
+# but ships a containerd v2 binary which only honors v3-schema sections
+# (e.g. [plugins."io.containerd.cri.v1.runtime".cni]). Result: CRI starts but
+# CNI bin_dir/conf_dir are empty, every Pod fails with "failed to find plugin
+# cilium-cni in path []". Overwrite with a v3-schema config and restart so
+# Pod sandbox creation works. Mirror of the manual repair on existing nodes.
+cat >/etc/containerd/config.toml <<'CONTAINERD_V3_EOF'
+imports = ["/etc/containerd/conf.d/*.toml"]
+oom_score = 0
+version = 3
+
+[metrics]
+  address = "0.0.0.0:10257"
+
+[plugins]
+
+  [plugins."io.containerd.cri.v1.images"]
+    sandbox_image = "mcr.microsoft.com/oss/kubernetes/pause:3.9"
+
+    [plugins."io.containerd.cri.v1.images".registry]
+      config_path = "/etc/containerd/certs.d"
+
+      [plugins."io.containerd.cri.v1.images".registry.headers]
+        X-Meta-Source-Client = ["azure/aks"]
+
+  [plugins."io.containerd.cri.v1.runtime"]
+
+    [plugins."io.containerd.cri.v1.runtime".cni]
+      bin_dir = "/opt/cni/bin"
+      conf_dir = "/etc/cni/net.d"
+
+    [plugins."io.containerd.cri.v1.runtime".containerd]
+
+      [plugins."io.containerd.cri.v1.runtime".containerd.runtimes]
+
+        [plugins."io.containerd.cri.v1.runtime".containerd.runtimes.runc]
+          runtime_type = "io.containerd.runc.v2"
+
+          [plugins."io.containerd.cri.v1.runtime".containerd.runtimes.runc.options]
+            BinaryName = "/usr/local/bin/runc"
+            SystemdCgroup = true
+CONTAINERD_V3_EOF
+systemctl restart containerd
 rm -rf /tmp/flex
