@@ -47,5 +47,15 @@ version = 3
             BinaryName = "/usr/local/bin/runc"
             SystemdCgroup = true
 CONTAINERD_V3_EOF
+# Workaround for AKSFlexNode v0.0.x gap (continued): the gpu-operator/aks-flex
+# bake drops /etc/containerd/conf.d/99-nvidia.toml that sets
+#   bin_dir = ""
+#   bin_dirs = ["/opt/cni/bin"]
+# in [plugins."io.containerd.cri.v1.runtime".cni]. containerd 2.0.4 only honors
+# bin_dir (singular) — the empty string blanks out our main config. Patch the
+# import to set bin_dir to /opt/cni/bin so CNI plugin discovery works.
+if [ -f /etc/containerd/conf.d/99-nvidia.toml ]; then
+  sed -i 's|bin_dir = ""|bin_dir = "/opt/cni/bin"|' /etc/containerd/conf.d/99-nvidia.toml
+fi
 systemctl restart containerd
 rm -rf /tmp/flex
