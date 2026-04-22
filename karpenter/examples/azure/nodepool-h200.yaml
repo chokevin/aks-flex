@@ -1,0 +1,29 @@
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: h200
+spec:
+  template:
+    spec:
+      nodeClassRef:
+        group: flex.aks.azure.com
+        kind: AzureFlexNodeClass
+        name: h200-eastus2
+      requirements:
+        - key: node.kubernetes.io/instance-type
+          operator: In
+          values:
+            - Standard_ND96isr_H200_v5
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values:
+            - on-demand
+      taints:
+        - key: nvidia.com/gpu
+          value: "true"
+          effect: NoSchedule
+  limits:
+    nvidia.com/gpu: 64
+  disruption:
+    consolidationPolicy: WhenEmpty
+    consolidateAfter: 30s
