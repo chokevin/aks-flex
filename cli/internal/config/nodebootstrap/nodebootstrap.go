@@ -7,6 +7,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/Azure/aks-flex/plugin/pkg/services/agentpools/api/features/kubeadm"
 	"github.com/Azure/aks-flex/plugin/pkg/services/agentpools/userdata/flex"
 	"github.com/Azure/aks-flex/plugin/pkg/services/agentpools/userdata/ubuntu"
 	"github.com/Azure/aks-flex/plugin/pkg/util/cloudinit"
@@ -25,6 +26,8 @@ var flagEnableNvidiaGPURuntime bool
 var flagVariant string
 var flagArch string
 var flagKubeVersion string
+var flagNodeLabels []string
+var flagTaints []string
 
 func init() {
 	r.Handle("ubuntu", writeUbuntuUserData)
@@ -37,6 +40,10 @@ func init() {
 		"Kubernetes version for the downloaded binaries.")
 	Command.Flags().StringVar(&flagVariant, "variant", variantCloudInit,
 		fmt.Sprintf("Output variant: %q produces cloud-init YAML user data, %q produces an equivalent standalone bash script.", variantCloudInit, variantScript))
+	Command.Flags().StringSliceVar(&flagNodeLabels, "node-label", nil,
+		"Extra node label to register the node with, as key=value. Repeat for multiple labels. Merged with the labels derived from the AKS cluster (cluster name, managed=false, stretch-managed=true).")
+	Command.Flags().StringSliceVar(&flagTaints, "taint", nil,
+		"Taint to register the node with, as key[=value]:Effect (e.g. nvidia.com/gpu=present:NoSchedule). Repeat for multiple taints.")
 }
 
 // marshalUserData marshals the cloud-init UserData according to the selected
@@ -62,11 +69,15 @@ func marshalUserData(ud *cloudinit.UserData, w io.Writer) error {
 }
 
 func writeFlexUserData(ctx context.Context, w io.Writer) error {
+	kc, err := kubeadmConfigFromFlags(ctx)
+	if err != nil {
+		return err
+	}
 	ud, err := flex.UserData(
 		flex.WithEnableNvidiaGPURuntime(flagEnableNvidiaGPURuntime),
 		flex.WithArch(flagArch),
 		flex.WithKubeVersion(flagKubeVersion),
-		flex.WithKubeadmConfig(configcmd.DefaultKubeadmConfig(ctx)),
+		flex.WithKubeadmConfig(kc),
 	)
 	if err != nil {
 		return fmt.Errorf("generating flex userdata: %w", err)
@@ -75,9 +86,38 @@ func writeFlexUserData(ctx context.Context, w io.Writer) error {
 }
 
 func writeUbuntuUserData(ctx context.Context, w io.Writer) error {
-	ud, err := ubuntu.UserData(configcmd.DefaultKubeadmConfig(ctx))
+	kc, err := kubeadmConfigFromFlags(ctx)
+	if err != nil {
+		return err
+	}
+	ud, err := ubuntu.UserData(kc)
 	if err != nil {
 		return fmt.Errorf("generating ubuntu userdata: %w", err)
 	}
 	return marshalUserData(ud, w)
+}
+
+// kubeadmConfigFromFlags returns the default kubeadm config (derived from the
+// live AKS cluster when reachable) with extra --node-label and --taint flag
+// values merged in.
+func kubeadmConfigFromFlags(ctx context.Context) (*kubeadm.Config, error) {
+	kc := configcmd.DefaultKubeadmConfig(ctx)
+
+	extraLabels, err := parseNodeLabels(flagNodeLabels)
+	if err != nil {
+		return nil, err
+	}
+	if len(extraLabels) > 0 {
+		kc.AddNodeLabels(extraLabels)
+	}
+
+	taints, err := parseTaints(flagTaints)
+	if err != nil {
+		return nil, err
+	}
+	if len(taints) > 0 {
+		kc.AddK8SRegisterTaints(taints...)
+	}
+
+	return kc, nil
 }
