@@ -82,8 +82,9 @@ func (c *NodeClassStatusController) ensureFinalizer(
 	if controllerutil.ContainsFinalizer(nodeClass, v1alpha1.TerminationFinalizer) {
 		return nil
 	}
+	base := nodeClass.DeepCopy()
 	controllerutil.AddFinalizer(nodeClass, v1alpha1.TerminationFinalizer)
-	if err := c.kubeClient.Patch(ctx, nodeClass, client.MergeFrom(nodeClass)); err != nil {
+	if err := c.kubeClient.Patch(ctx, nodeClass, client.MergeFrom(base)); err != nil {
 		return fmt.Errorf("patch finalizer: %w", err)
 	}
 	return nil

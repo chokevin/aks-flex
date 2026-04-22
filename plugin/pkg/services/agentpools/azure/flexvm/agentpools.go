@@ -27,6 +27,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/arm"
@@ -221,7 +222,16 @@ func (srv *agentpoolsServer) CreateOrUpdate(ctx context.Context, req *api.Create
 	}
 	vmResp, err := vmPoller.PollUntilDone(ctx, nil)
 	if err != nil {
+		// VM provisioning failed mid-flight: NIC was created but VM never
+		// reached a state where DeleteOption=Delete would cascade. Best-effort
+		// cleanup with a fresh context so it still runs if ctx was cancelled.
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		_, _ = nicsClient.BeginDelete(cleanupCtx, spec.GetResourceGroup(), nicName, nil)
+		cancel()
 		return nil, fmt.Errorf("polling VM creation %q: %w", vmName, err)
+	}
+	if vmResp.ID == nil {
+		return nil, fmt.Errorf("VM %q created but Azure returned nil resource ID", vmName)
 	}
 
 	ap.SetStatus(AgentPoolStatus_builder{
@@ -272,17 +282,20 @@ func (srv *agentpoolsServer) Delete(ctx context.Context, req *api.DeleteRequest)
 	}
 
 	// Best-effort NIC delete in case the VM never made it to a state where
-	// DeleteOption applied (e.g. failed mid-create). Idempotent.
+	// DeleteOption applied (e.g. failed mid-create). Idempotent. Uses a fresh
+	// context so cleanup still runs if the caller's ctx was cancelled mid-Delete.
+	nicCtx, nicCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer nicCancel()
 	nicsClient, err := armnetwork.NewInterfacesClient(spec.GetSubscriptionId(), srv.credentials, nil)
 	if err != nil {
 		return nil, fmt.Errorf("creating NIC client: %w", err)
 	}
-	nicPoller, err := nicsClient.BeginDelete(ctx, spec.GetResourceGroup(), nicName, nil)
+	nicPoller, err := nicsClient.BeginDelete(nicCtx, spec.GetResourceGroup(), nicName, nil)
 	if err != nil && !isNotFound(err) {
 		return nil, fmt.Errorf("starting NIC delete %q: %w", nicName, err)
 	}
 	if nicPoller != nil {
-		if _, err := nicPoller.PollUntilDone(ctx, nil); err != nil && !isNotFound(err) {
+		if _, err := nicPoller.PollUntilDone(nicCtx, nil); err != nil && !isNotFound(err) {
 			return nil, fmt.Errorf("polling NIC delete %q: %w", nicName, err)
 		}
 	}

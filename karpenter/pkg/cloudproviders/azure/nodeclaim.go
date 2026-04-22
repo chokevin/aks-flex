@@ -36,6 +36,13 @@ import (
 // [armIDToProviderID] is lossless.
 
 func armIDToProviderID(armID string) string {
+	// Empty ARM ID (e.g. status not yet populated by plugin) → empty providerID.
+	// Karpenter treats empty providerID as "node not yet bound" and will retry,
+	// rather than producing an invalid `azure-flex:///` URL that breaks
+	// downstream parsers.
+	if armID == "" {
+		return ""
+	}
 	if !strings.HasPrefix(armID, "/") {
 		armID = "/" + armID
 	}
