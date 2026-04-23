@@ -26,6 +26,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -80,7 +81,7 @@ func NewAgentPoolsServer(storage db.RODB) (agentpools.AgentPoolsServer, error) {
 	}, nil
 }
 
-func (srv *agentpoolsServer) CreateOrUpdate(ctx context.Context, req *api.CreateOrUpdateRequest) (*api.CreateOrUpdateResponse, error) {
+func (srv *agentpoolsServer) CreateOrUpdate(ctx context.Context, req *api.CreateOrUpdateRequest) (resp *api.CreateOrUpdateResponse, err error) {
 	ap, err := helper.AnyTo[*AgentPool](req.GetItem())
 	if err != nil {
 		return nil, err
@@ -151,6 +152,38 @@ func (srv *agentpoolsServer) CreateOrUpdate(ctx context.Context, req *api.Create
 	}
 	nicID := *nicResp.ID
 
+	// Best-effort NIC cleanup if anything between here and the successful VM
+	// creation fails. Without this, every quota-rejected / ARM-rejected VM
+	// create on a Karpenter retry loop leaks one NIC, which exhausts the
+	// subnet (observed: ~250 orphan NICs accumulating per hour during
+	// quota-blocked H100 churn). Uses a fresh background context because the
+	// gRPC ctx is often already cancelled by the time we land here on retry.
+	// Best-effort NIC cleanup if anything between here and the successful VM
+	// creation fails.
+	//
+	// Azure platform quirk: after *any* VM CreateOrUpdate attempt (even one
+	// that fails synchronously with 409 quota), ARM reserves the referenced
+	// NIC for the target VM name for 180 seconds. Delete attempts during
+	// that window return 400 NicReservedForAnotherVm. We therefore cannot
+	// clean up synchronously inside the gRPC handler — Karpenter expects a
+	// fast error response so it can back off and retry. We spawn a detached
+	// goroutine that waits out the reservation and retries with backoff.
+	//
+	// Best-effort contract:
+	//   - Cleanup survives only while the plugin process is alive. On pod
+	//     restart, any in-flight orphan NICs need manual sweep or a periodic
+	//     reconciler (future work).
+	//   - Under sustained quota exhaustion, the number of sleeping
+	//     cleanup goroutines is bounded by the retry rate (observed ~7/min)
+	//     times the cleanup window (~4 min) — a few dozen max.
+	nicCleanedUp := false
+	defer func() {
+		if err == nil || nicCleanedUp {
+			return
+		}
+		go cleanupReservedNIC(nicsClient, spec.GetResourceGroup(), nicName)
+	}()
+
 	// 2. VM. NIC + OS disk both set DeleteOption=Delete so a single VM
 	// delete cascades — this is critical for Karpenter retry idempotency.
 	vmsClient, err := armcompute.NewVirtualMachinesClient(spec.GetSubscriptionId(), srv.credentials, nil)
@@ -216,23 +249,18 @@ func (srv *agentpoolsServer) CreateOrUpdate(ctx context.Context, req *api.Create
 
 	vmPoller, err := vmsClient.BeginCreateOrUpdate(ctx, spec.GetResourceGroup(), vmName, vmParams, nil)
 	if err != nil {
-		// Best-effort NIC cleanup if VM create kicked back synchronously.
-		_, _ = nicsClient.BeginDelete(ctx, spec.GetResourceGroup(), nicName, nil)
 		return nil, fmt.Errorf("creating VM %q: %w", vmName, err)
 	}
 	vmResp, err := vmPoller.PollUntilDone(ctx, nil)
 	if err != nil {
-		// VM provisioning failed mid-flight: NIC was created but VM never
-		// reached a state where DeleteOption=Delete would cascade. Best-effort
-		// cleanup with a fresh context so it still runs if ctx was cancelled.
-		cleanupCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-		_, _ = nicsClient.BeginDelete(cleanupCtx, spec.GetResourceGroup(), nicName, nil)
-		cancel()
 		return nil, fmt.Errorf("polling VM creation %q: %w", vmName, err)
 	}
 	if vmResp.ID == nil {
 		return nil, fmt.Errorf("VM %q created but Azure returned nil resource ID", vmName)
 	}
+	// VM is up and owns the NIC via DeleteOption=Delete; suppress the deferred
+	// NIC cleanup so a downstream marshal failure doesn't tear down the node.
+	nicCleanedUp = true
 
 	ap.SetStatus(AgentPoolStatus_builder{
 		VmResourceId: vmResp.ID,
@@ -393,4 +421,53 @@ func isNotFound(err error) bool {
 		return rerr.StatusCode == 404
 	}
 	return false
+}
+
+// cleanupReservedNIC deletes an orphan NIC after the 180s ARM reservation
+// window expires. Runs detached (its own goroutine); intended only for the
+// post-VM-create-failure path where the NIC is guaranteed to outlive its
+// caller's request context. All errors are best-effort logged; under
+// sustained ARM turbulence this may leave orphans that a human or periodic
+// reconciler will need to sweep.
+func cleanupReservedNIC(nicsClient *armnetwork.InterfacesClient, resourceGroup, nicName string) {
+	// Wait out the ARM 180s NIC reservation window, plus slack for clock
+	// skew and any in-flight VM-create retry that might re-reserve the NIC
+	// on the same name (Karpenter retries DO use new nodeclaim names, so
+	// this is belt-and-suspenders).
+	time.Sleep(3*time.Minute + 30*time.Second)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	for attempt := 0; attempt < 5; attempt++ {
+		delPoller, delErr := nicsClient.BeginDelete(ctx, resourceGroup, nicName, nil)
+		if delErr == nil {
+			if _, pollErr := delPoller.PollUntilDone(ctx, nil); pollErr == nil {
+				slog.Info("flexvm orphan NIC cleanup succeeded",
+					"nic", nicName, "attempt", attempt)
+				return
+			} else {
+				slog.Warn("flexvm orphan NIC poll failed",
+					"nic", nicName, "attempt", attempt, "err", pollErr)
+			}
+		} else {
+			// 404 = already gone (raced with someone else). Treat as success.
+			if isNotFound(delErr) {
+				slog.Info("flexvm orphan NIC already gone",
+					"nic", nicName, "attempt", attempt)
+				return
+			}
+			slog.Warn("flexvm orphan NIC BeginDelete failed",
+				"nic", nicName, "attempt", attempt, "err", delErr)
+		}
+
+		select {
+		case <-time.After(30 * time.Second):
+		case <-ctx.Done():
+			slog.Error("flexvm orphan NIC cleanup timed out",
+				"nic", nicName, "attempts", attempt+1)
+			return
+		}
+	}
+	slog.Error("flexvm orphan NIC cleanup exhausted retries", "nic", nicName)
 }
