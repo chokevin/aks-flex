@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/arm"
 	opcontroller "github.com/awslabs/operatorpkg/controller"
 	"github.com/awslabs/operatorpkg/reasonable"
 	"k8s.io/apimachinery/pkg/api/equality"
@@ -104,6 +105,9 @@ func validateSpec(spec v1alpha1.AzureFlexNodeClassSpec) error {
 	}
 	if !strings.HasPrefix(spec.SubnetID, "/subscriptions/") {
 		return fmt.Errorf("subnetID %q must be a full ARM resource ID", spec.SubnetID)
+	}
+	if _, err := arm.ParseResourceID(spec.SubnetID); err != nil {
+		return fmt.Errorf("subnetID %q is not a valid ARM resource ID: %w", spec.SubnetID, err)
 	}
 	if spec.ImageReference != nil && spec.ImageID != nil && *spec.ImageID != "" {
 		return fmt.Errorf("imageReference and imageID are mutually exclusive")

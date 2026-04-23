@@ -157,7 +157,15 @@ func (c *CloudProvider) Create(ctx context.Context, nodeClaim *v1.NodeClaim) (*v
 		return nil, fmt.Errorf("creating azure-flex agent pool: %w", err)
 	}
 
-	return agentPoolToNodeClaim(created, it), nil
+	// Stamp the NodeClass drift hash onto the returned NodeClaim so that
+	// IsDrifted can detect spec changes later. Without this annotation the
+	// drift check silently no-ops.
+	out := agentPoolToNodeClaim(created, it)
+	if out.Annotations == nil {
+		out.Annotations = map[string]string{}
+	}
+	out.Annotations[v1alpha1.AzureFlexNodeClassHashAnnotation] = driftHash(nodeClass.Spec)
+	return out, nil
 }
 
 func (c *CloudProvider) Delete(ctx context.Context, nodeClaim *v1.NodeClaim) error {

@@ -137,10 +137,9 @@ func (srv *agentpoolsServer) CreateOrUpdate(ctx context.Context, req *api.Create
 		},
 	}
 	if spec.GetAllocatePublicIp() {
-		// Phase 1: skip explicit PIP creation — leave a TODO. Per-NodeClass
-		// public IP is deferred; documented in CRD.
-		// (Falls through to private-only NIC.)
-		_ = nicParams // satisfy linter
+		// validateSpec rejects this; the branch is kept as a compile-time
+		// reminder for when Phase 2 adds PIP support.
+		return nil, errors.New("allocate_public_ip=true is not supported in Phase 1")
 	}
 	nicPoller, err := nicsClient.BeginCreateOrUpdate(ctx, spec.GetResourceGroup(), nicName, nicParams, nil)
 	if err != nil {
@@ -356,6 +355,16 @@ func validateSpec(spec *AgentPoolSpec) error {
 	}
 	if st := spec.GetSecurityType(); st != "" && st != "Standard" {
 		return fmt.Errorf("unsupported security_type %q (only Standard is supported in Phase 1)", st)
+	}
+	// Public IP per NIC is not implemented in Phase 1. Reject instead of
+	// silently creating a private-only NIC when callers expect a public one.
+	if spec.GetAllocatePublicIp() {
+		return errors.New("allocate_public_ip=true is not supported in Phase 1")
+	}
+	// kubeadm config carries the AKS bootstrap token + CA and is used to
+	// render userdata; a nil value here would panic in CreateOrUpdate.
+	if spec.GetKubeadm() == nil {
+		return errors.New("kubeadm is required")
 	}
 	return nil
 }
