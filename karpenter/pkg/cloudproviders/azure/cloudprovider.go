@@ -18,12 +18,15 @@ import (
 	"github.com/Azure/karpenter-provider-azure/pkg/utils"
 	"github.com/awslabs/operatorpkg/status"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	grpcstatus "google.golang.org/grpc/status"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	v1 "sigs.k8s.io/karpenter/pkg/apis/v1"
 	corecloudprovider "sigs.k8s.io/karpenter/pkg/cloudprovider"
 
+	pluginapi "github.com/Azure/aks-flex/plugin/api"
 	stretchhelper "github.com/Azure/aks-flex/plugin/pkg/helper"
 	stretchservices "github.com/Azure/aks-flex/plugin/pkg/services"
 	agentpoolsapi "github.com/Azure/aks-flex/plugin/pkg/services/agentpools/api"
@@ -49,6 +52,8 @@ type CloudProvider struct {
 
 	instanceTypeProvider *instancetype.Provider
 }
+
+var flexAgentPoolTypeURL = "type.googleapis.com/" + string((&flexvm.AgentPool{}).ProtoReflect().Descriptor().FullName())
 
 func newCloudProvider(
 	stretchPluginConn *grpc.ClientConn,
@@ -177,11 +182,8 @@ func (c *CloudProvider) Delete(ctx context.Context, nodeClaim *v1.NodeClaim) err
 
 	// Per CloudProvider.Delete contract: signal NodeClaimNotFoundError if the
 	// remote resource is already gone (so karpenter knows it's safe to drop).
-	if _, err := stretchhelper.Get[*flexvm.AgentPool](
-		c.stretchAgentPoolsClient.Get,
-		ctx, nodeClaim.Name,
-	); err != nil {
-		if IsNotFound(err) {
+	if _, err := c.getFlexAgentPool(ctx, nodeClaim.Name); err != nil {
+		if IsNotFound(err) || IsTypeMismatch(err) {
 			return corecloudprovider.NewNodeClaimNotFoundError(err)
 		}
 		// Non-NotFound get failure: log and proceed with delete in best effort.
@@ -192,6 +194,9 @@ func (c *CloudProvider) Delete(ctx context.Context, nodeClaim *v1.NodeClaim) err
 		c.stretchAgentPoolsClient.Delete,
 		ctx, nodeClaim.Name,
 	); err != nil {
+		if IsNotFound(err) || IsTypeMismatch(err) {
+			return corecloudprovider.NewNodeClaimNotFoundError(err)
+		}
 		return fmt.Errorf("deleting azure-flex agent pool: %w", err)
 	}
 	logger.Info("deleted azure-flex agent pool", "nodeClaim", nodeClaim.Name)
@@ -203,12 +208,9 @@ func (c *CloudProvider) Get(ctx context.Context, providerID string) (*v1.NodeCla
 	if err != nil {
 		return nil, err
 	}
-	ap, err := stretchhelper.Get[*flexvm.AgentPool](
-		c.stretchAgentPoolsClient.Get,
-		ctx, name,
-	)
+	ap, err := c.getFlexAgentPool(ctx, name)
 	if err != nil {
-		if IsNotFound(err) {
+		if IsNotFound(err) || IsTypeMismatch(err) {
 			return nil, corecloudprovider.NewNodeClaimNotFoundError(err)
 		}
 		return nil, err
@@ -217,6 +219,26 @@ func (c *CloudProvider) Get(ctx context.Context, providerID string) (*v1.NodeCla
 	// not have a class on hand) — pass nil instanceType and accept missing
 	// well-known labels. They'll be repopulated by the next Create-flow Get.
 	return agentPoolToNodeClaim(ap, nil), nil
+}
+
+func (c *CloudProvider) getFlexAgentPool(ctx context.Context, id string) (*flexvm.AgentPool, error) {
+	req := &pluginapi.GetRequest{}
+	req.SetId(id)
+	resp, err := c.stretchAgentPoolsClient.Get(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	return flexAgentPoolFromGetResponse(resp)
+}
+
+func flexAgentPoolFromGetResponse(resp *pluginapi.GetResponse) (*flexvm.AgentPool, error) {
+	if resp == nil || resp.GetItem() == nil {
+		return nil, grpcstatus.Error(codes.NotFound, "")
+	}
+	if resp.GetItem().GetTypeUrl() != flexAgentPoolTypeURL {
+		return nil, grpcstatus.Error(codes.NotFound, "")
+	}
+	return stretchhelper.AnyTo[*flexvm.AgentPool](resp.GetItem())
 }
 
 func (c *CloudProvider) List(ctx context.Context) ([]*v1.NodeClaim, error) {

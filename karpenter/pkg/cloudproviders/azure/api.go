@@ -26,6 +26,16 @@ func IsNotFound(err error) bool {
 	return false
 }
 
+// IsTypeMismatch returns true if err indicates the plugin returned an object of
+// a different concrete protobuf type than the caller expected.
+func IsTypeMismatch(err error) bool {
+	if err == nil {
+		return false
+	}
+	s, ok := status.FromError(err)
+	return ok && s.Code() == codes.InvalidArgument && strings.Contains(s.Message(), "type mismatch")
+}
+
 // IsQuotaError returns true if err signals an Azure quota / capacity exhaustion.
 // We classify both HTTP 429 and the well-known Azure ARM error codes.
 func IsQuotaError(err error) bool {
