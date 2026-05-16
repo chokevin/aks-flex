@@ -13,6 +13,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
+	"time"
 
 	karpoptions "github.com/Azure/karpenter-provider-azure/pkg/operator/options"
 	"github.com/Azure/karpenter-provider-azure/pkg/utils"
@@ -38,6 +40,8 @@ import (
 	"github.com/Azure/aks-flex/karpenter/pkg/cloudproviders/azure/instancetype"
 )
 
+const incompleteAgentPoolCleanupDelay = 30 * time.Minute
+
 type CloudProvider struct {
 	stretchPluginConn       *grpc.ClientConn
 	stretchAgentPoolsClient agentpoolsapi.AgentPoolsClient
@@ -51,6 +55,8 @@ type CloudProvider struct {
 	clusterCA []byte
 
 	instanceTypeProvider *instancetype.Provider
+
+	cleanupInFlight sync.Map
 }
 
 var flexAgentPoolTypeURL = "type.googleapis.com/" + string((&flexvm.AgentPool{}).ProtoReflect().Descriptor().FullName())
@@ -157,6 +163,7 @@ func (c *CloudProvider) Create(ctx context.Context, nodeClaim *v1.NodeClaim) (*v
 	)
 	if err != nil {
 		if IsQuotaError(err) {
+			c.cleanupAgentPoolInBackground(ctx, nodeClaim.Name, "quota/capacity create failure")
 			return nil, corecloudprovider.NewInsufficientCapacityError(err)
 		}
 		return nil, fmt.Errorf("creating azure-flex agent pool: %w", err)
@@ -174,15 +181,14 @@ func (c *CloudProvider) Create(ctx context.Context, nodeClaim *v1.NodeClaim) (*v
 }
 
 func (c *CloudProvider) Delete(ctx context.Context, nodeClaim *v1.NodeClaim) error {
-	logger := log.FromContext(ctx).WithValues("nodeClaim", nodeClaim.Name)
-	if nodeClaim.Status.ProviderID == "" {
-		logger.V(5).Info("nodeClaim has no providerID, skipping deletion")
-		return nil
-	}
+	return c.deleteAgentPool(ctx, nodeClaim.Name)
+}
 
+func (c *CloudProvider) deleteAgentPool(ctx context.Context, name string) error {
+	logger := log.FromContext(ctx).WithValues("agentPool", name)
 	// Per CloudProvider.Delete contract: signal NodeClaimNotFoundError if the
 	// remote resource is already gone (so karpenter knows it's safe to drop).
-	if _, err := c.getFlexAgentPool(ctx, nodeClaim.Name); err != nil {
+	if _, err := c.getFlexAgentPool(ctx, name); err != nil {
 		if IsNotFound(err) || IsTypeMismatch(err) {
 			return corecloudprovider.NewNodeClaimNotFoundError(err)
 		}
@@ -192,14 +198,14 @@ func (c *CloudProvider) Delete(ctx context.Context, nodeClaim *v1.NodeClaim) err
 
 	if err := stretchhelper.Delete(
 		c.stretchAgentPoolsClient.Delete,
-		ctx, nodeClaim.Name,
+		ctx, name,
 	); err != nil {
 		if IsNotFound(err) || IsTypeMismatch(err) {
 			return corecloudprovider.NewNodeClaimNotFoundError(err)
 		}
 		return fmt.Errorf("deleting azure-flex agent pool: %w", err)
 	}
-	logger.Info("deleted azure-flex agent pool", "nodeClaim", nodeClaim.Name)
+	logger.Info("deleted azure-flex agent pool")
 	return nil
 }
 
@@ -242,7 +248,7 @@ func flexAgentPoolFromGetResponse(resp *pluginapi.GetResponse) (*flexvm.AgentPoo
 }
 
 func (c *CloudProvider) List(ctx context.Context) ([]*v1.NodeClaim, error) {
-	aps, err := stretchhelper.List[*flexvm.AgentPool](
+	aps, err := stretchhelper.ListByType[*flexvm.AgentPool](
 		c.stretchAgentPoolsClient.List,
 		ctx, "",
 	)
@@ -250,10 +256,52 @@ func (c *CloudProvider) List(ctx context.Context) ([]*v1.NodeClaim, error) {
 		return nil, err
 	}
 	out := make([]*v1.NodeClaim, 0, len(aps))
+	now := time.Now()
 	for _, ap := range aps {
+		if ap.GetStatus().GetVmResourceId() == "" {
+			if shouldCleanupIncompleteAgentPool(ap, now) {
+				c.cleanupAgentPoolInBackground(ctx, ap.GetMetadata().GetId(), "stale incomplete agent pool")
+			}
+			continue
+		}
 		out = append(out, agentPoolToNodeClaim(ap, nil))
 	}
 	return out, nil
+}
+
+func shouldCleanupIncompleteAgentPool(ap *flexvm.AgentPool, now time.Time) bool {
+	if ap.GetStatus().GetVmResourceId() != "" {
+		return false
+	}
+	createdAt := ap.GetStatus().GetCreatedAt()
+	if createdAt == nil {
+		return true
+	}
+	return !createdAt.AsTime().Add(incompleteAgentPoolCleanupDelay).After(now)
+}
+
+func (c *CloudProvider) cleanupAgentPoolInBackground(ctx context.Context, name, reason string) {
+	if name == "" {
+		return
+	}
+	if _, loaded := c.cleanupInFlight.LoadOrStore(name, struct{}{}); loaded {
+		return
+	}
+
+	logger := log.FromContext(ctx).WithValues("agentPool", name, "reason", reason)
+	logger.Info("starting azure-flex agent pool cleanup")
+	go func() {
+		defer c.cleanupInFlight.Delete(name)
+
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
+		defer cancel()
+
+		if err := c.deleteAgentPool(cleanupCtx, name); err != nil && !corecloudprovider.IsNodeClaimNotFoundError(err) {
+			logger.Error(err, "cleaning up azure-flex agent pool")
+			return
+		}
+		logger.Info("cleaned up azure-flex agent pool")
+	}()
 }
 
 func (c *CloudProvider) GetInstanceTypes(ctx context.Context, nodePool *v1.NodePool) ([]*corecloudprovider.InstanceType, error) {

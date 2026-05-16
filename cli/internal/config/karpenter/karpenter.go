@@ -44,9 +44,11 @@ podLabels:
 
 controller:
   nebiusCredentials:
-    enabled: true
 {{- if .NebiusCredentialsJSON }}
+    enabled: true
     credentialsJSON: {{ .NebiusCredentialsJSON }}
+{{- else }}
+    enabled: false
 {{- end }}
   image:
     digest: ""

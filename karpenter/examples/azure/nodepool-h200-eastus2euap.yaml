@@ -1,7 +1,7 @@
 apiVersion: karpenter.sh/v1
 kind: NodePool
 metadata:
-  name: h200
+  name: h200-eastus2euap
 spec:
   template:
     metadata:
@@ -12,7 +12,7 @@ spec:
       nodeClassRef:
         group: flex.aks.azure.com
         kind: AzureFlexNodeClass
-        name: h200-eastus2
+        name: h200-eastus2euap
       requirements:
         - key: node.kubernetes.io/instance-type
           operator: In

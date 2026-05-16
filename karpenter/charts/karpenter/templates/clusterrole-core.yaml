@@ -71,7 +71,7 @@ rules:
   {{- if .Values.webhook.enabled }}
   - apiGroups: ["apiextensions.k8s.io"]
     resources: ["customresourcedefinitions/status"]
-    resourceNames: ["aksnodeclasses.karpenter.azure.com", "nodepools.karpenter.sh", "nodeclaims.karpenter.sh", "nebiusnodeclasses.flex.aks.azure.com"]
+    resourceNames: ["aksnodeclasses.karpenter.azure.com", "nodepools.karpenter.sh", "nodeclaims.karpenter.sh", "nebiusnodeclasses.flex.aks.azure.com", "azureflexnodeclasses.flex.aks.azure.com", "kaitonodeclasses.kaito.sh"]
     verbs: ["patch"]
   - apiGroups: ["apiextensions.k8s.io"]
     resources: ["customresourcedefinitions"]

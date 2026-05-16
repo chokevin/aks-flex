@@ -2,6 +2,8 @@ package helper
 
 import (
 	"context"
+	"fmt"
+	"reflect"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -96,6 +98,63 @@ func List[M proto.Message, REQT any, REQ id[REQT], RESP items](list func(context
 	}
 
 	return ms, nil
+}
+
+// ListByType filters parent list responses to the concrete protobuf type M.
+// It still fails if a matching Any payload cannot be decoded.
+func ListByType[M proto.Message, REQT any, REQ id[REQT], RESP items](list func(context.Context, REQ, ...grpc.CallOption) (RESP, error), ctx context.Context, id string, opts ...grpc.CallOption) ([]M, error) {
+	req := REQ(new(REQT))
+	req.SetId(id)
+
+	resp, err := list(ctx, req, opts...)
+	if err != nil {
+		return nil, err
+	}
+
+	typeURL, err := typeURLFor[M]()
+	if err != nil {
+		return nil, err
+	}
+
+	var ms []M
+	for _, item := range resp.GetItems() {
+		if item.GetTypeUrl() != typeURL {
+			continue
+		}
+
+		m, err := AnyTo[M](item)
+		if err != nil {
+			return nil, err
+		}
+
+		ms = append(ms, m)
+	}
+
+	return ms, nil
+}
+
+func typeURLFor[M proto.Message]() (string, error) {
+	msg, err := newProtoMessage[M]()
+	if err != nil {
+		return "", err
+	}
+	return "type.googleapis.com/" + string(msg.ProtoReflect().Descriptor().FullName()), nil
+}
+
+func newProtoMessage[M proto.Message]() (M, error) {
+	var zero M
+	t := reflect.TypeOf(zero)
+	if t == nil {
+		return zero, fmt.Errorf("proto message type has no concrete type")
+	}
+	if t.Kind() != reflect.Pointer {
+		return zero, fmt.Errorf("proto message type %T must be a pointer", zero)
+	}
+	msg, ok := reflect.New(t.Elem()).Interface().(M)
+	if !ok {
+		return zero, fmt.Errorf("proto message type %T cannot be constructed", zero)
+	}
+	return msg, nil
 }
 
 func AnyTo[M proto.Message](o *anypb.Any) (M, error) {

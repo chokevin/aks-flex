@@ -1,0 +1,21 @@
+apiVersion: flex.aks.azure.com/v1alpha1
+kind: AzureFlexNodeClass
+metadata:
+  name: h200-eastus2euap
+spec:
+  subscriptionID: 00000000-0000-0000-0000-000000000000
+  location: eastus2euap
+  resourceGroup: my-flex-rg
+  subnetID: /subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/my-flex-rg/providers/Microsoft.Network/virtualNetworks/flex-vnet-eastus2euap/subnets/nodes
+  imageReference:
+    publisher: microsoft-dsvm
+    offer: ubuntu-hpc
+    sku: "2204"
+    version: latest
+  securityType: Standard
+  osDiskSizeGB: 256
+  allocateNodePublicIP: false
+  maxPodsPerNode: 110
+  tags:
+    purpose: karpenter-flex-h200
+    managed-by: aks-flex-karpenter

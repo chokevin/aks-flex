@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/Azure/karpenter-provider-azure/pkg/apis"
@@ -9,11 +10,17 @@ import (
 	"github.com/Azure/karpenter-provider-azure/pkg/controllers"
 	"github.com/Azure/karpenter-provider-azure/pkg/operator"
 	"github.com/Azure/karpenter-provider-azure/pkg/operator/options"
+	"github.com/go-logr/logr"
 	"github.com/go-logr/zapr"
 	"github.com/samber/lo"
+	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
 	"sigs.k8s.io/karpenter/pkg/cloudprovider/metrics"
 	"sigs.k8s.io/karpenter/pkg/cloudprovider/overlay"
 	corecontrollers "sigs.k8s.io/karpenter/pkg/controllers"
@@ -45,13 +52,17 @@ func main() {
 	ctx := injection.WithOptionsOrDie(context.Background(), coreoptions.Injectables...)
 	logger := zapr.NewLogger(logging.NewLogger(ctx, "controller"))
 	lo.Must0(
-		operator.WaitForCRDs(
+		operator.WaitForCRDs(ctx, 2*time.Minute, ctrl.GetConfigOrDie(), logger),
+		"failed waiting for CRDs",
+	)
+	lo.Must0(
+		waitForCRDs(
 			ctx, 2*time.Minute, ctrl.GetConfigOrDie(), logger,
 			&v1alpha1.NebiusNodeClass{},
 			&v1alpha1.AzureFlexNodeClass{},
 			&kaitov1alpha1.KaitoNodeClass{},
 		),
-		"failed waiting for CRDs",
+		"failed waiting for flex CRDs",
 	)
 
 	ctx, op := operator.NewOperator(coreoperator.NewOperator())
@@ -159,8 +170,11 @@ func main() {
 			// TODO: still need to refactor ImageProvider side of things.
 			op.KubernetesVersionProvider,
 			op.ImageProvider,
+			op.InstanceTypesProvider,
 			op.InClusterKubernetesInterface,
 			op.AZClient.SubnetsClient(),
+			op.AZClient.DiskEncryptionSetsClient(),
+			options.FromContext(ctx).ParsedDiskEncryptionSetID,
 		)...).
 		WithControllers(ctx, flexcontrollers.NewControllers(
 			ctx,
@@ -168,4 +182,51 @@ func main() {
 			op.EventRecorder,
 		)...).
 		Start(ctx)
+}
+
+func waitForCRDs(ctx context.Context, timeout time.Duration, config *rest.Config, logger logr.Logger, objs ...runtime.Object) error {
+	client, err := rest.HTTPClientFor(config)
+	if err != nil {
+		return fmt.Errorf("creating kubernetes client: %w", err)
+	}
+	restMapper, err := apiutil.NewDynamicRESTMapper(config, client)
+	if err != nil {
+		return fmt.Errorf("creating dynamic rest mapper: %w", err)
+	}
+
+	requiredGVKs := make([]schema.GroupVersionKind, 0, len(objs))
+	for _, obj := range objs {
+		gvk, err := apiutil.GVKForObject(obj, scheme.Scheme)
+		if err != nil {
+			return fmt.Errorf("getting GVK for %T: %w", obj, err)
+		}
+		requiredGVKs = append(requiredGVKs, gvk)
+	}
+
+	logger.Info("waiting for flex CRDs to be available", "gvks", requiredGVKs, "timeout", timeout)
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	for _, gvk := range requiredGVKs {
+		err := wait.PollUntilContextCancel(ctx, 10*time.Second, true, func(ctx context.Context) (bool, error) {
+			if _, err := restMapper.RESTMapping(gvk.GroupKind(), gvk.Version); err != nil {
+				if meta.IsNoMatchError(err) {
+					logger.V(1).Info("waiting for flex CRD to be available", "gvk", gvk)
+					return false, nil
+				}
+				return false, err
+			}
+			logger.V(1).Info("flex CRD is available", "gvk", gvk)
+			return true, nil
+		})
+		if err != nil {
+			if ctx.Err() == context.DeadlineExceeded {
+				return fmt.Errorf("timed out waiting for CRD %s to be available", gvk)
+			}
+			return fmt.Errorf("failed to wait for CRD %s: %w", gvk, err)
+		}
+	}
+
+	logger.Info("all flex CRDs are available")
+	return nil
 }

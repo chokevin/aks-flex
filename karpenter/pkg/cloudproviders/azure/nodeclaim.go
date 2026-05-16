@@ -91,7 +91,7 @@ func agentPoolToNodeClaim(
 	rv := &v1.NodeClaim{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:              ap.GetMetadata().GetId(),
-			Labels:            map[string]string{},
+			Labels:            lo.Assign(map[string]string{}, ap.GetSpec().GetKubeadm().GetNodeLabels()),
 			Annotations:       map[string]string{},
 			CreationTimestamp: metav1.NewTime(ap.GetStatus().GetCreatedAt().AsTime()),
 		},
@@ -102,7 +102,7 @@ func agentPoolToNodeClaim(
 	}
 
 	if instanceType != nil {
-		rv.Labels = labelspkg.GetAllSingleValuedRequirementLabels(instanceType.Requirements)
+		rv.Labels = lo.Assign(rv.Labels, labelspkg.GetAllSingleValuedRequirementLabels(instanceType.Requirements))
 		rv.Status.Capacity = lo.PickBy(instanceType.Capacity, filterNonZero)
 		rv.Status.Allocatable = lo.PickBy(instanceType.Allocatable(), filterNonZero)
 	}
@@ -135,21 +135,23 @@ func nodeClaimToAgentPool(
 		Server:                   lo.ToPtr(karpOpts.ClusterEndpoint),
 		CertificateAuthorityData: clusterCA,
 		Token:                    lo.ToPtr(karpOpts.KubeletClientTLSBootstrapToken),
-		NodeLabels: map[string]string{
+		NodeLabels: lo.Assign(map[string]string{}, nodeClaim.Labels, map[string]string{
 			cloudproviders.NodeClaimLabelKey:          nodeClaim.Name,
 			topology.NodeLabelKeyCloudProviderManaged: "false",
 			topology.NodeLabelKeyCloudProviderCluster: karpOpts.NodeResourceGroup,
 			topology.NodeLabelKeyStretchManaged:       "true",
-		},
+		}),
 	}.Build()
 	kubeadmConfig.AddNodeLabels(map[string]string{
 		corev1.LabelInstanceTypeStable: instanceType.Name,
 		corev1.LabelTopologyRegion:     nodeClass.Spec.Location,
 		// Empty zone — region-only Phase 1.
-		corev1.LabelTopologyZone:  "",
-		v1.CapacityTypeLabelKey:   v1.CapacityTypeOnDemand,
+		corev1.LabelTopologyZone:    "",
+		v1.CapacityTypeLabelKey:     v1.CapacityTypeOnDemand,
 		"kubernetes.azure.com/mode": "user",
 	})
+	kubeadmConfig.AddK8SRegisterTaints(nodeClaim.Spec.Taints...)
+	kubeadmConfig.AddK8SRegisterTaints(nodeClaim.Spec.StartupTaints...)
 	kubeadmConfig.AddK8SRegisterTaints(v1.UnregisteredNoExecuteTaint)
 
 	specBuilder := flexvm.AgentPoolSpec_builder{

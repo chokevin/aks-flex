@@ -64,12 +64,12 @@ const (
 
 type agentpoolsServer struct {
 	agentpools.UnimplementedAgentPoolsServer
-	storage db.RODB
+	storage db.DB
 
 	credentials azcore.TokenCredential
 }
 
-func NewAgentPoolsServer(storage db.RODB) (agentpools.AgentPoolsServer, error) {
+func NewAgentPoolsServer(storage db.DB) (agentpools.AgentPoolsServer, error) {
 	credentials, err := azidentity.NewDefaultAzureCredential(nil)
 	if err != nil {
 		return nil, err
@@ -150,37 +150,14 @@ func (srv *agentpoolsServer) CreateOrUpdate(ctx context.Context, req *api.Create
 		return nil, fmt.Errorf("polling NIC creation %q: %w", nicName, err)
 	}
 	nicID := *nicResp.ID
+	persistIncompleteAgentPool(srv.storage, ap)
 
-	// Best-effort NIC cleanup if anything between here and the successful VM
-	// creation fails. Without this, every quota-rejected / ARM-rejected VM
-	// create on a Karpenter retry loop leaks one NIC, which exhausts the
-	// subnet (observed: ~250 orphan NICs accumulating per hour during
-	// quota-blocked H100 churn). Uses a fresh background context because the
-	// gRPC ctx is often already cancelled by the time we land here on retry.
-	// Best-effort NIC cleanup if anything between here and the successful VM
-	// creation fails.
-	//
-	// Azure platform quirk: after *any* VM CreateOrUpdate attempt (even one
-	// that fails synchronously with 409 quota), ARM reserves the referenced
-	// NIC for the target VM name for 180 seconds. Delete attempts during
-	// that window return 400 NicReservedForAnotherVm. We therefore cannot
-	// clean up synchronously inside the gRPC handler — Karpenter expects a
-	// fast error response so it can back off and retry. We spawn a detached
-	// goroutine that waits out the reservation and retries with backoff.
-	//
-	// Best-effort contract:
-	//   - Cleanup survives only while the plugin process is alive. On pod
-	//     restart, any in-flight orphan NICs need manual sweep or a periodic
-	//     reconciler (future work).
-	//   - Under sustained quota exhaustion, the number of sleeping
-	//     cleanup goroutines is bounded by the retry rate (observed ~7/min)
-	//     times the cleanup window (~4 min) — a few dozen max.
 	nicCleanedUp := false
 	defer func() {
 		if err == nil || nicCleanedUp {
 			return
 		}
-		go cleanupReservedNIC(nicsClient, spec.GetResourceGroup(), nicName)
+		go cleanupReservedNIC(nicsClient, spec.GetResourceGroup(), nicName, srv.storage, vmName)
 	}()
 
 	// 2. VM. NIC + OS disk both set DeleteOption=Delete so a single VM
@@ -432,13 +409,54 @@ func isNotFound(err error) bool {
 	return false
 }
 
+func persistIncompleteAgentPool(storage db.DB, ap *AgentPool) {
+	if storage == nil || ap == nil || ap.GetMetadata().GetId() == "" {
+		return
+	}
+	var createdAt *timestamppb.Timestamp
+	if obj, ok := storage.Get(ap.GetMetadata().GetId()); ok {
+		existing, err := helper.To[*AgentPool](obj)
+		if err == nil && existing.GetStatus().GetVmResourceId() != "" {
+			return
+		}
+		if err == nil {
+			createdAt = existing.GetStatus().GetCreatedAt()
+		}
+	}
+	if ap.GetStatus().GetCreatedAt() != nil {
+		createdAt = ap.GetStatus().GetCreatedAt()
+	}
+	if ap.GetStatus().GetVmResourceId() == "" && createdAt == nil {
+		createdAt = timestamppb.Now()
+	}
+	if ap.GetStatus().GetVmResourceId() == "" {
+		ap.SetStatus(AgentPoolStatus_builder{
+			CreatedAt: createdAt,
+		}.Build())
+	}
+	storage.CreateOrUpdate(ap)
+}
+
+func deleteIncompleteAgentPool(storage db.DB, id string) {
+	if storage == nil || id == "" {
+		return
+	}
+	obj, ok := storage.Get(id)
+	if !ok {
+		return
+	}
+	ap, err := helper.To[*AgentPool](obj)
+	if err != nil || ap.GetStatus().GetVmResourceId() != "" {
+		return
+	}
+	storage.Delete(id)
+}
+
 // cleanupReservedNIC deletes an orphan NIC after the 180s ARM reservation
-// window expires. Runs detached (its own goroutine); intended only for the
-// post-VM-create-failure path where the NIC is guaranteed to outlive its
-// caller's request context. All errors are best-effort logged; under
-// sustained ARM turbulence this may leave orphans that a human or periodic
-// reconciler will need to sweep.
-func cleanupReservedNIC(nicsClient *armnetwork.InterfacesClient, resourceGroup, nicName string) {
+// window expires. The failed AgentPool is persisted before this starts so a
+// plugin restart can still rediscover and delete the orphan through Karpenter's
+// normal List/Delete path.
+func cleanupReservedNIC(nicsClient *armnetwork.InterfacesClient, resourceGroup, nicName string, storage db.DB, agentPoolID string) {
 	// Wait out the ARM 180s NIC reservation window, plus slack for clock
 	// skew and any in-flight VM-create retry that might re-reserve the NIC
 	// on the same name (Karpenter retries DO use new nodeclaim names, so
@@ -452,6 +470,7 @@ func cleanupReservedNIC(nicsClient *armnetwork.InterfacesClient, resourceGroup, 
 		delPoller, delErr := nicsClient.BeginDelete(ctx, resourceGroup, nicName, nil)
 		if delErr == nil {
 			if _, pollErr := delPoller.PollUntilDone(ctx, nil); pollErr == nil {
+				deleteIncompleteAgentPool(storage, agentPoolID)
 				slog.Info("flexvm orphan NIC cleanup succeeded",
 					"nic", nicName, "attempt", attempt)
 				return
@@ -462,6 +481,7 @@ func cleanupReservedNIC(nicsClient *armnetwork.InterfacesClient, resourceGroup, 
 		} else {
 			// 404 = already gone (raced with someone else). Treat as success.
 			if isNotFound(delErr) {
+				deleteIncompleteAgentPool(storage, agentPoolID)
 				slog.Info("flexvm orphan NIC already gone",
 					"nic", nicName, "attempt", attempt)
 				return

@@ -296,7 +296,7 @@ func (c *CloudProvider) Get(ctx context.Context, providerID string) (*v1.NodeCla
 }
 
 func (c *CloudProvider) List(ctx context.Context) ([]*v1.NodeClaim, error) {
-	agentPools, err := stretchhelper.List[*nebiusinstance.AgentPool](
+	agentPools, err := stretchhelper.ListByType[*nebiusinstance.AgentPool](
 		c.stretchAgentPoolsClient.List,
 		ctx, "",
 	)
